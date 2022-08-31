@@ -17,7 +17,7 @@ type CelestialBodyReference = Rc<RefCell<CelestialBody>>;
 type ShipReference = Rc<RefCell<Ship>>;
 type TrialElement = (Vec2, Color, Timer);
 
-const G: f32 = 10.;
+const G: f32 = 20.;
 const AU: f32 = 149600.;
 const SHIP_SIZE: f32 = 10.;
 const SHIP_ACCELERATION: f32 = 10.;
@@ -25,6 +25,8 @@ const SHIP_ROT_SPEED: f32 = 90.;
 const INFO_FONT_SIZE: f32 = 18.;
 const TRAIL_CLEANUP_IIME: f32 = 300.;
 const PHYSICS_STEP: f32 = 0.02;
+const SIMULATION_STEP: f32 = 0.5;
+const MAJOR_CB_HILL_RADIUS_COEFICIENT: f32 = 10.;
 
 
 fn wrap_object<T>(obj: T) -> Rc<RefCell<T>> {
@@ -48,29 +50,25 @@ fn gravity_vel(a_pos: Vec2, a_mass: f32, b_pos: Vec2, b_mass: f32, dt: f32) -> (
   )
 }
 
+fn apply_gravity_asteroids(asteroids: &[CelestialBodyReference], dt: f32) {
+  for a in asteroids {
+    let mut go_a = a.borrow_mut();
+    if let CelestialBodyType::Asteroid(cb_parent) = &go_a.cb_type.clone() {
+      let go_b = cb_parent.borrow();
+      let (vela, _) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
+      go_a.mov.vel += vela;
+    }
+  }
+}
+
 fn apply_gravity_to_celestial_bodies(celestial_bodies: &[CelestialBodyReference], dt: f32) {
-  let _z = ZoneGuard::new("apply_gravity_to_celestial_bodies");
   for i in 0..celestial_bodies.len() {
     let mut go_a = celestial_bodies[i].borrow_mut();
-    match go_a.cb_type.clone() {
-      CelestialBodyType::Asteroid(cb_parent) => {
-        let go_b = cb_parent.borrow();
-        let (vela, _) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
-        go_a.mov.vel += vela;
-      }
-      _ => {
-        for j in (i+1)..celestial_bodies.len() {
-          let mut go_b = celestial_bodies[j].borrow_mut();
-          match go_b.cb_type.clone() {
-            CelestialBodyType::Asteroid(_) => {}
-            _ => {
-              let (vela, velb) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
-              go_a.mov.vel += vela;
-              go_b.mov.vel += velb;
-            }
-          }
-        }
-      }
+    for j in (i+1)..celestial_bodies.len() {
+      let mut go_b = celestial_bodies[j].borrow_mut();
+      let (vela, velb) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
+      go_a.mov.vel += vela;
+      go_b.mov.vel += velb;
     }
   }
 }
@@ -80,7 +78,6 @@ fn apply_gravity_to_ships(ships: &[ShipReference], celestial_bodies: &[Celestial
     s.borrow_mut().apply_gravity(celestial_bodies, dt);
   }
 }
-
 
 fn get_initial_position_and_velocity(parent_mass: f32, distance: f32, angle: f32) -> (Vec2, Vec2) {
   let delta_vector = rotate_vec2_by_rad(&vec2(distance, 0.), angle.to_radians());
@@ -159,7 +156,11 @@ impl CelestialBody {
   }
 
   pub fn pos_in_hill_radius(&self, pos: &Vec2) -> bool {
-    point_in_circle(pos, &self.mov.pos, self.hill_radius)
+    let hr = match self.cb_type {
+      CelestialBodyType::Asteroid(_) => self.hill_radius,
+      _ => self.hill_radius * MAJOR_CB_HILL_RADIUS_COEFICIENT
+    };
+    point_in_circle(pos, &self.mov.pos, hr)
   }
 }
 
@@ -301,11 +302,11 @@ impl Ship {
         for cb in celestial_bodies {
           if cb.borrow().pos_in_hill_radius(&self.mov.pos) {
             self.in_hill_radius_of.push(cb.clone());
+            let mut cb = cb.borrow_mut();
+            let (vela, velb) = gravity_vel(self.mov.pos, self.mov.mass, cb.mov.pos, cb.mov.mass, dt);
+            self.mov.vel += vela;
+            cb.mov.vel += velb;
           }
-          let mut cb = cb.borrow_mut();
-          let (vela, velb) = gravity_vel(self.mov.pos, self.mov.mass, cb.mov.pos, cb.mov.mass, dt);
-          self.mov.vel += vela;
-          cb.mov.vel += velb;
         }
       },
       ShipState::Landed(cb, _) => {
@@ -367,6 +368,7 @@ fn simulate_hill_radius(ships: &[ShipReference], iterations: usize, dt: f32) -> 
 
     for i in 0..iterations {
       apply_gravity_to_celestial_bodies(&celestial_bodies, dt);
+      s.apply_gravity(&celestial_bodies, dt);
 
       for cb in &celestial_bodies {
         cb.borrow_mut().update(dt);
@@ -374,7 +376,6 @@ fn simulate_hill_radius(ships: &[ShipReference], iterations: usize, dt: f32) -> 
           simulated_trail.push(((cb.borrow().mov.pos), cb.borrow().color, Timer::new(10.)));
         }
       }
-      s.apply_gravity(&celestial_bodies, dt);
       s.update(dt);
 
       let state = s.state.clone();
@@ -417,7 +418,10 @@ fn simulate_hill_radius(ships: &[ShipReference], iterations: usize, dt: f32) -> 
 //   let mut simulated_trail = vec![];
 
 //   for i in 0..iterations {
-//     apply_gravity(ships, celestial_bodies, dt);
+//     apply_gravity_to_celestial_bodies(celestial_bodies, dt);
+//     for s in ships {
+//       s.borrow_mut().apply_gravity(&celestial_bodies, dt);
+//     }
 
 //     for cb in celestial_bodies {
 //       cb.borrow_mut().update(dt);
@@ -488,7 +492,7 @@ fn get_random_angle() -> f32 {
   rand::gen_range(-180., 180.)
 }
 
-fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, ShipReference, Vec<GameObjectReference>) {
+fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<ShipReference>, ShipReference, Vec<GameObjectReference>) {
   srand(seed);
 
   let sol_mass = 30000000.;
@@ -647,7 +651,7 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, Sh
       "S/2003".to_owned(),
     )
   );
-  let mut celestial_bodies: Vec<CelestialBodyReference> = vec![
+  let mut all_celestial_bodies: Vec<CelestialBodyReference> = vec![
     sol.clone(),
     planet0.clone(),
     planet1.clone(),
@@ -662,6 +666,22 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, Sh
     planet4_2.clone(),
     planet4_3.clone(),
   ];
+  let major_celestial_bodies: Vec<CelestialBodyReference> = vec![
+    sol.clone(),
+    planet0.clone(),
+    planet1.clone(),
+    planet2.clone(),
+    planet2_0.clone(),
+    planet3.clone(),
+    planet3_0.clone(),
+    planet3_1.clone(),
+    planet4.clone(),
+    planet4_0.clone(),
+    planet4_1.clone(),
+    planet4_2.clone(),
+    planet4_3.clone(),
+  ];
+  let mut minor_celestial_bodies: Vec<CelestialBodyReference> = vec![];
 
   let mut game_objects: Vec<GameObjectReference> = vec![
     sol.clone(),
@@ -679,10 +699,18 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, Sh
     planet4_3.clone(),
   ];
 
+  let cb = major_celestial_bodies.choose().unwrap().clone();
+  let (p, v) = get_initial_position_and_velocity(cb.borrow().mov.mass, cb.borrow().radius * 1.5, get_random_angle());
+  let ship = wrap_object(
+    Ship::new(cb.borrow().mov.pos + p, cb.borrow().mov.vel + v, 1000.)
+  );
+  game_objects.push(ship.clone());
+
   for angle in 0..360 {
     let mut last_distance = 0.;
     let mut last_radius = 0.;
-    for i in 0..10 {
+    let asteroid_cnt = rand::gen_range(1, 5);
+    for i in 0..asteroid_cnt {
       let angle_increment = rand::gen_range(0., 1.);
       let distance = AU * 3.2 + last_distance + last_radius + rand::gen_range(500., 1000.);
       let radius = 10. + rand::gen_range(10., 40.);
@@ -701,7 +729,8 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, Sh
         )
       );
 
-      celestial_bodies.push(asteroid.clone());
+      minor_celestial_bodies.push(asteroid.clone());
+      all_celestial_bodies.push(asteroid.clone());
       game_objects.push(asteroid.clone());
 
       last_distance = distance - AU * 3.2;
@@ -709,16 +738,9 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<ShipReference>, Sh
     }
   }
 
-  let cb = celestial_bodies.choose().unwrap().clone();
-  let (p, v) = get_initial_position_and_velocity(cb.borrow().mov.mass, cb.borrow().radius * 1.5, get_random_angle());
-  let ship = wrap_object(
-    Ship::new(cb.borrow().mov.pos + p, cb.borrow().mov.vel + v, 100000.)
-  );
-  game_objects.push(ship.clone());
-
   let ships: Vec<ShipReference> = vec![ship.clone()];
 
-  (celestial_bodies, ships, ship, game_objects)
+  (all_celestial_bodies, major_celestial_bodies, minor_celestial_bodies, ships, ship, game_objects)
 }
 
 #[macroquad::main(window_conf)]
@@ -728,7 +750,9 @@ async fn main() {
   let mut show_trails = false;
 
   let (
-    mut celestial_bodies,
+    mut all_celestial_bodies,
+    mut major_celestial_bodies,
+    mut minor_celestial_bodies,
     mut ships,
     mut ship,
     mut game_objects
@@ -747,8 +771,9 @@ async fn main() {
   loop {
     // let dt = get_frame_time();
     let dt = PHYSICS_STEP;
-    apply_gravity_to_celestial_bodies(&celestial_bodies, dt);
-    apply_gravity_to_ships(&ships, &celestial_bodies, dt);
+    apply_gravity_to_celestial_bodies(&major_celestial_bodies, dt);
+    apply_gravity_asteroids(&minor_celestial_bodies, dt);
+    apply_gravity_to_ships(&ships, &all_celestial_bodies, dt);
 
     trail_elements.retain_mut(|(_p, _c, t)| {
       t.update(dt);
@@ -758,7 +783,9 @@ async fn main() {
     if is_key_released(KeyCode::I) {
       seed = seed + 1;
       (
-        celestial_bodies,
+        all_celestial_bodies,
+        major_celestial_bodies,
+        minor_celestial_bodies,
         ships,
         ship,
         game_objects
@@ -789,7 +816,6 @@ async fn main() {
         scale = (scale + get_scale_delta(scale)).min(5000.);
       }
       focus = ship.mov.pos;
-      // focus = planet2.borrow().mov.pos;
     }
 
     for go in &game_objects {
@@ -798,7 +824,7 @@ async fn main() {
     {
       let _z = ZoneGuard::new("collision");
       for s in &ships {
-        s.borrow_mut().process_collision(&celestial_bodies, dt);
+        s.borrow_mut().process_collision(&all_celestial_bodies, dt);
       }
     }
 
@@ -806,8 +832,8 @@ async fn main() {
     simulated_trail_timer.update(dt);
 
     if simulated_trail_timer.is_just_over() && show_trails {
-      // simulated_trail = simulate(&ships, &celestial_bodies, 200, 0.5);
-      simulated_trail = simulate_hill_radius(&ships, 200, 0.5);
+      // simulated_trail = simulate(&ships, &major_celestial_bodies, 200, SIMULATION_STEP);
+      simulated_trail = simulate_hill_radius(&ships, 200, SIMULATION_STEP);
     }
     if trail_emitter_timer.is_just_over() {
       trail_elements.push(((ship.borrow().mov.pos), WHITE, Timer::new(TRAIL_CLEANUP_IIME)));
