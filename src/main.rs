@@ -17,8 +17,8 @@ type CelestialBodyReference = Rc<RefCell<CelestialBody>>;
 type ShipReference = Rc<RefCell<Ship>>;
 type TrialElement = (Vec2, Color, Timer);
 
-const G: f32 = 20.;
-const AU: f32 = 149600.;
+const G: f32 = 50.;
+const AU: f32 = 150000.;
 const SHIP_SIZE: f32 = 10.;
 const SHIP_ACCELERATION: f32 = 10.;
 const SHIP_ROT_SPEED: f32 = 90.;
@@ -26,7 +26,9 @@ const INFO_FONT_SIZE: f32 = 18.;
 const TRAIL_CLEANUP_IIME: f32 = 300.;
 const PHYSICS_STEP: f32 = 0.02;
 const SIMULATION_STEP: f32 = 0.5;
-const MAJOR_CB_HILL_RADIUS_COEFICIENT: f32 = 10.;
+const MAJOR_CB_HILL_RADIUS_COEFICIENT: f32 = 3.;
+const DAY_TIME: f32 = 24.;
+const TERMINAL_VELOCITY: f32 = 30.;
 
 
 fn wrap_object<T>(obj: T) -> Rc<RefCell<T>> {
@@ -50,14 +52,12 @@ fn gravity_vel(a_pos: Vec2, a_mass: f32, b_pos: Vec2, b_mass: f32, dt: f32) -> (
   )
 }
 
-fn apply_gravity_asteroids(asteroids: &[CelestialBodyReference], dt: f32) {
+fn apply_gravity_asteroids(asteroids: &[CelestialBodyReference], parent: &CelestialBodyReference, dt: f32) {
   for a in asteroids {
     let mut go_a = a.borrow_mut();
-    if let CelestialBodyType::Asteroid(cb_parent) = &go_a.cb_type.clone() {
-      let go_b = cb_parent.borrow();
-      let (vela, _) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
-      go_a.mov.vel += vela;
-    }
+    let go_b = parent.borrow();
+    let (vela, _) = gravity_vel(go_a.mov.pos, go_a.mov.mass, go_b.mov.pos, go_b.mov.mass, dt);
+    go_a.mov.vel += vela;
   }
 }
 
@@ -104,7 +104,7 @@ enum CelestialBodyType {
   Star,
   Planet,
   Moon,
-  Asteroid(CelestialBodyReference),
+  Asteroid,
 }
 
 impl CelestialBodyType {
@@ -113,7 +113,7 @@ impl CelestialBodyType {
       Self::Star => 15.,
       Self::Planet => 5.,
       Self::Moon => 3.,
-      Self::Asteroid(_) => 1.,
+      Self::Asteroid => 1.,
     }
   }
 }
@@ -157,7 +157,7 @@ impl CelestialBody {
 
   pub fn pos_in_hill_radius(&self, pos: &Vec2) -> bool {
     let hr = match self.cb_type {
-      CelestialBodyType::Asteroid(_) => self.hill_radius,
+      CelestialBodyType::Asteroid => self.hill_radius,
       _ => self.hill_radius * MAJOR_CB_HILL_RADIUS_COEFICIENT
     };
     point_in_circle(pos, &self.mov.pos, hr)
@@ -174,8 +174,9 @@ impl GameObject for CelestialBody {
     let radius = (self.radius / scale).max(self.cb_type.min_display_radius());
     draw_circle(act_pos.x, act_pos.y, radius, self.color);
     match self.cb_type {
-      CelestialBodyType::Asteroid(_) => {},
+      CelestialBodyType::Asteroid => {},
       _ => {
+        // draw_circle_lines(act_pos.x, act_pos.y, self.hill_radius / scale, 1., self.color);
         draw_text(&format!("{}", self.name), act_pos.x - radius / 2., act_pos.y - radius - INFO_FONT_SIZE + 4., INFO_FONT_SIZE, self.color);
       }
     }
@@ -186,6 +187,7 @@ impl GameObject for CelestialBody {
 enum ShipState {
   Landed(CelestialBodyReference, Vec2),
   InSpace,
+  Destroyed,
 }
 
 impl Debug for ShipState {
@@ -196,6 +198,9 @@ impl Debug for ShipState {
       },
       ShipState::Landed(cb, tv) => {
         write!(f, "Landed on {}, takeoff v: [{:.2}][{:.2}]", cb.borrow().name, tv.x, tv.y)
+      },
+      ShipState::Destroyed => {
+        write!(f, "Destroyed")
       }
     }
   }
@@ -246,7 +251,8 @@ impl Ship {
       },
       ShipState::Landed(_, ref mut takeoff_vel) => {
         *takeoff_vel += vel;
-      }
+      },
+      _ => {}
     }
     self.fuel -= (SHIP_ACCELERATION * dt).max(0.);
   }
@@ -260,9 +266,16 @@ impl Ship {
   }
 
   fn land(&mut self, cb: CelestialBodyReference) {
-    self.state = ShipState::Landed(cb.clone(), Vec2::ZERO);
-    self.mov.rot = -(self.mov.pos - cb.borrow().mov.pos).angle_between(vec2(1., 0.));
+    let rot = -(self.mov.pos - cb.borrow().mov.pos).angle_between(vec2(1., 0.));
+    println!("{} > {}, {}, {}", (self.mov.rot - rot).abs(), 30_f32.to_radians(), (self.mov.vel - cb.borrow().mov.vel).length_squared(), TERMINAL_VELOCITY.powi(2));
+    if (self.mov.rot % 360_f32.to_radians() - rot).abs() > 30_f32.to_radians() || (self.mov.vel - cb.borrow().mov.vel).length_squared() > TERMINAL_VELOCITY.powi(2) {
+      self.state = ShipState::Destroyed;
+      return;
+    }
+
+    self.mov.rot = rot;
     self.fuel = self.max_fuel;
+    self.state = ShipState::Landed(cb.clone(), Vec2::ZERO);
   }
 
   fn takeoff(&mut self, takeoff_vel: Vec2) {
@@ -283,7 +296,8 @@ impl Ship {
         if !self.check_collision(takeoff_vel, &cb.borrow(), dt) {
           self.takeoff(takeoff_vel);
         }
-      }
+      },
+      _ => {}
     }
   }
 
@@ -297,7 +311,7 @@ impl Ship {
 
   pub fn apply_gravity(&mut self, celestial_bodies: &[CelestialBodyReference], dt: f32) {
     match &self.state {
-      ShipState::InSpace => {
+      ShipState::InSpace | ShipState::Destroyed => {
         self.in_hill_radius_of.clear();
         for cb in celestial_bodies {
           if cb.borrow().pos_in_hill_radius(&self.mov.pos) {
@@ -492,10 +506,11 @@ fn get_random_angle() -> f32 {
   rand::gen_range(-180., 180.)
 }
 
-fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<ShipReference>, ShipReference, Vec<GameObjectReference>) {
+fn initialize(seed: u64) -> (CelestialBodyReference, Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<CelestialBodyReference>, Vec<ShipReference>, ShipReference, Vec<GameObjectReference>) {
   srand(seed);
 
   let sol_mass = 30000000.;
+  let sol_mass_ratio = 2000.;
 
   let sol = wrap_object(
     CelestialBody::new(
@@ -512,7 +527,7 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
       &sol.borrow(),
       AU * 0.4,
       get_random_angle(),
-      sol_mass / (3300. / 0.05),
+      sol_mass / (sol_mass_ratio / 0.05),
       100.,
       CelestialBodyType::Planet,
       BROWN,
@@ -524,7 +539,7 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
       &sol.borrow(),
       AU * 0.7,
       get_random_angle(),
-      sol_mass / (3300. / 0.8),
+      sol_mass / (sol_mass_ratio / 0.8),
       210.,
       CelestialBodyType::Planet,
       BEIGE,
@@ -536,17 +551,18 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
       &sol.borrow(),
       AU,
       get_random_angle(),
-      sol_mass / 3300.,
+      sol_mass / sol_mass_ratio,
       300.,
       CelestialBodyType::Planet,
       BLUE,
       "Ganymede".to_owned(),
     )
   );
+
   let planet2_0 = wrap_object(
     CelestialBody::from_parent(
       &planet2.borrow(),
-      8000.,
+      planet2.borrow().hill_radius * 0.14,
       get_random_angle(),
       900.,
       80.,
@@ -560,7 +576,7 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
       &sol.borrow(),
       AU * 1.5,
       get_random_angle(),
-      sol_mass / (3300. / 0.5),
+      sol_mass / (1000. / 0.8),
       200.,
       CelestialBodyType::Planet,
       RED,
@@ -570,9 +586,9 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet3_0 = wrap_object(
     CelestialBody::from_parent(
       &planet3.borrow(),
-      3500.,
+      planet3.borrow().hill_radius * 0.09,
       get_random_angle(),
-      600.,
+      100.,
       60.,
       CelestialBodyType::Moon,
       GRAY,
@@ -582,9 +598,9 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet3_1 = wrap_object(
     CelestialBody::from_parent(
       &planet3.borrow(),
-      6000.,
+      planet3.borrow().hill_radius * 0.15,
       get_random_angle(),
-      500.,
+      90.,
       50.,
       CelestialBodyType::Moon,
       GRAY,
@@ -594,9 +610,9 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet4 = wrap_object(
     CelestialBody::from_parent(
       &sol.borrow(),
-      AU * 4.5,
+      AU * 5.3,
       get_random_angle(),
-      sol_mass / 1000.,
+      sol_mass / (sol_mass_ratio / 10.),
       3100.,
       CelestialBodyType::Planet,
       BEIGE,
@@ -606,9 +622,9 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet4_0 = wrap_object(
     CelestialBody::from_parent(
       &planet4.borrow(),
-      7000.,
+      planet4.borrow().hill_radius * 0.14,
       get_random_angle(),
-      900.,
+      90.,
       75.,
       CelestialBodyType::Moon,
       GRAY,
@@ -618,10 +634,10 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet4_1 = wrap_object(
     CelestialBody::from_parent(
       &planet4.borrow(),
-      12900.,
+      planet4.borrow().hill_radius * 0.23,
       get_random_angle(),
-      1300.,
-      120.,
+      130.,
+      90.,
       CelestialBodyType::Moon,
       GRAY,
       "Eurydome".to_owned(),
@@ -630,25 +646,13 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   let planet4_2 = wrap_object(
     CelestialBody::from_parent(
       &planet4.borrow(),
-      17700.,
+      planet4.borrow().hill_radius * 0.31,
       get_random_angle(),
-      950.,
-      150.,
+      95.,
+      75.,
       CelestialBodyType::Moon,
       GRAY,
       "Sponde".to_owned(),
-    )
-  );
-  let planet4_3 = wrap_object(
-    CelestialBody::from_parent(
-      &planet4.borrow(),
-      29000.,
-      get_random_angle(),
-      600.,
-      50.,
-      CelestialBodyType::Moon,
-      GRAY,
-      "S/2003".to_owned(),
     )
   );
   let mut all_celestial_bodies: Vec<CelestialBodyReference> = vec![
@@ -664,7 +668,6 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
     planet4_0.clone(),
     planet4_1.clone(),
     planet4_2.clone(),
-    planet4_3.clone(),
   ];
   let major_celestial_bodies: Vec<CelestialBodyReference> = vec![
     sol.clone(),
@@ -679,7 +682,6 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
     planet4_0.clone(),
     planet4_1.clone(),
     planet4_2.clone(),
-    planet4_3.clone(),
   ];
   let mut minor_celestial_bodies: Vec<CelestialBodyReference> = vec![];
 
@@ -696,7 +698,6 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
     planet4_0.clone(),
     planet4_1.clone(),
     planet4_2.clone(),
-    planet4_3.clone(),
   ];
 
   let cb = major_celestial_bodies.choose().unwrap().clone();
@@ -706,15 +707,16 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
   );
   game_objects.push(ship.clone());
 
+  let asteroid_belt_distance = AU * 2.7;
   for angle in 0..360 {
     let mut last_distance = 0.;
     let mut last_radius = 0.;
     let asteroid_cnt = rand::gen_range(1, 5);
     for i in 0..asteroid_cnt {
       let angle_increment = rand::gen_range(0., 1.);
-      let distance = AU * 3.2 + last_distance + last_radius + rand::gen_range(500., 1000.);
+      let distance = asteroid_belt_distance + last_distance + last_radius + rand::gen_range(500., 1000.);
       let radius = 10. + rand::gen_range(10., 40.);
-      let mass = rand::gen_range(100., 200.);
+      let mass = rand::gen_range(50., 100.);
 
       let asteroid = wrap_object(
         CelestialBody::from_parent(
@@ -723,7 +725,7 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
           angle as f32 + angle_increment,
           mass,
           radius,
-          CelestialBodyType::Asteroid(sol.clone()),
+          CelestialBodyType::Asteroid,
           GRAY,
           format!("Ast {:.1}/{}", angle, i),
         )
@@ -733,14 +735,14 @@ fn initialize(seed: u64) -> (Vec<CelestialBodyReference>, Vec<CelestialBodyRefer
       all_celestial_bodies.push(asteroid.clone());
       game_objects.push(asteroid.clone());
 
-      last_distance = distance - AU * 3.2;
+      last_distance = distance - asteroid_belt_distance;
       last_radius = radius;
     }
   }
 
   let ships: Vec<ShipReference> = vec![ship.clone()];
 
-  (all_celestial_bodies, major_celestial_bodies, minor_celestial_bodies, ships, ship, game_objects)
+  (sol, all_celestial_bodies, major_celestial_bodies, minor_celestial_bodies, ships, ship, game_objects)
 }
 
 #[macroquad::main(window_conf)]
@@ -750,6 +752,7 @@ async fn main() {
   let mut show_trails = false;
 
   let (
+    mut cb_parent,
     mut all_celestial_bodies,
     mut major_celestial_bodies,
     mut minor_celestial_bodies,
@@ -764,6 +767,10 @@ async fn main() {
   let mut trail_elements: Vec<TrialElement> = vec![];
   let mut simulated_trail_timer = Timer::new(0.5);
   let mut simulated_trail: Vec<TrialElement> = vec![];
+  let mut day_count: u32 = 1;
+  let mut day_timer = Timer::new(DAY_TIME);
+
+  let mut tick = 1;
 
   set_camera(&Camera2D::from_display_rect(Rect::new(-screen_width() / 2., -screen_height() / 2., screen_width(), screen_height())));
 
@@ -771,18 +778,16 @@ async fn main() {
   loop {
     // let dt = get_frame_time();
     let dt = PHYSICS_STEP;
-    apply_gravity_to_celestial_bodies(&major_celestial_bodies, dt);
-    apply_gravity_asteroids(&minor_celestial_bodies, dt);
-    apply_gravity_to_ships(&ships, &all_celestial_bodies, dt);
 
     trail_elements.retain_mut(|(_p, _c, t)| {
       t.update(dt);
       !t.is_just_over()
     });
 
-    if is_key_released(KeyCode::I) {
+    if is_key_released(KeyCode::B) {
       seed = seed + 1;
       (
+        cb_parent,
         all_celestial_bodies,
         major_celestial_bodies,
         minor_celestial_bodies,
@@ -792,9 +797,20 @@ async fn main() {
       ) = initialize(seed);
       simulated_trail = vec![];
       trail_elements = vec![];
+      day_count = 0;
+      day_timer = Timer::new(DAY_TIME);
     }
     if is_key_released(KeyCode::Space) {
       show_trails = !show_trails;
+    }
+    if is_key_released(KeyCode::I) {
+      tick = (tick * 2).min(1024);
+    }
+    if is_key_released(KeyCode::J) {
+      tick = (tick / 2).max(1);
+    }
+    if is_key_released(KeyCode::K) {
+      tick = 1;
     }
     {
       let mut ship = ship.borrow_mut();
@@ -815,23 +831,33 @@ async fn main() {
       } else if mouse_wheel().1 < 0. {
         scale = (scale + get_scale_delta(scale)).min(5000.);
       }
-      focus = ship.mov.pos;
     }
 
-    for go in &game_objects {
-      go.borrow_mut().update(dt);
-    }
+    for _ in 0..tick
     {
-      let _z = ZoneGuard::new("collision");
-      for s in &ships {
-        s.borrow_mut().process_collision(&all_celestial_bodies, dt);
+      apply_gravity_to_celestial_bodies(&major_celestial_bodies, dt);
+      apply_gravity_asteroids(&minor_celestial_bodies, &cb_parent, dt);
+      apply_gravity_to_ships(&ships, &all_celestial_bodies, dt);
+
+      for go in &game_objects {
+        go.borrow_mut().update(dt);
+      }
+      {
+        let _z = ZoneGuard::new("collision");
+        for s in &ships {
+          s.borrow_mut().process_collision(&all_celestial_bodies, dt);
+        }
+      }
+      day_timer.update(dt);
+      if day_timer.is_just_over() {
+        day_count += 1;
       }
     }
+    focus = ship.borrow().mov.pos;
 
     trail_emitter_timer.update(dt);
     simulated_trail_timer.update(dt);
-
-    if simulated_trail_timer.is_just_over() && show_trails {
+    if simulated_trail_timer.is_just_over() {
       // simulated_trail = simulate(&ships, &major_celestial_bodies, 200, SIMULATION_STEP);
       simulated_trail = simulate_hill_radius(&ships, 200, SIMULATION_STEP);
     }
@@ -859,9 +885,10 @@ async fn main() {
     }
 
 
-    draw_text(&format!("Scale: {}", scale), -screen_width() / 2. + 5., -screen_height() / 2. + 30., 24., WHITE);
-    draw_text(&format!("FPS: {}", get_fps()), -screen_width() / 2. + 5., -screen_height() / 2. + 60., 24., WHITE);
-    draw_text(&format!("Seed: {}", seed), -screen_width() / 2. + 5., -screen_height() / 2. + 90., 24., WHITE);
+    draw_text(&format!("Scale: {}, tick: {}", scale, tick), -screen_width() / 2. + 5., -screen_height() / 2. + 30., 24., WHITE);
+    // draw_text(&format!("FPS: {}", get_fps()), -screen_width() / 2. + 5., -screen_height() / 2. + 60., 24., WHITE);
+    // draw_text(&format!("Seed: {}", seed), -screen_width() / 2. + 5., -screen_height() / 2. + 90., 24., WHITE);
+    draw_text(&format!("Elapsed time: {} days", day_count), screen_width() / 2. - 256., -screen_height() / 2. + 30., 24., WHITE);
 
     #[cfg(debug_assertions)]
     macroquad_profiler::profiler(Default::default());

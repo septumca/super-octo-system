@@ -5,6 +5,7 @@ cargo build --target wasm32-unknown-unknown --release
 git checkout web
 cp target/wasm32-unknown-unknown/release/solsys.wasm .
 echo "Deploying"
+git add solsys.wasm
 git commit --amend -m "web"
 git push -u origin web --force
 git checkout master
